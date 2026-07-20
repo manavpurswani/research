@@ -199,7 +199,6 @@ def _resolve_framing(
     tpl: Dict[str, Any],
     ev_ratio_target: float,
     frame: int,
-    ab_swap: bool,
 ) -> Dict[str, Any]:
     """
     Build a fully resolved framing scenario.
@@ -245,22 +244,12 @@ def _resolve_framing(
             f"and {prob_pct}% probability that no {unit} will {verb_loss}."
         )
 
-    # Canonical option assignment before any swap:
-    #   canonical-A = certain option
-    #   canonical-B = risky option
-    # Biased choice before swap: gain→A (0), loss→B (1)
-    canonical_biased_pre_swap = CHOICE["A"] if frame == FRAME["gain"] else CHOICE["B"]
-
-    if not ab_swap:
-        option_a_text = certain_text
-        option_b_text = risky_text
-        ev_ratio_displayed = ev_ratio_actual  # EV(certain) / EV(risky)
-        canonical_biased_choice = canonical_biased_pre_swap
-    else:
-        option_a_text = risky_text
-        option_b_text = certain_text
-        ev_ratio_displayed = 1.0 / ev_ratio_actual  # inverted
-        canonical_biased_choice = 1 - canonical_biased_pre_swap  # flipped
+    # Option A is always the certain outcome; Option B is always the risky outcome.
+    # Biased choice: gain frame → risk-averse → A (0); loss frame → risk-seeking → B (1).
+    option_a_text = certain_text
+    option_b_text = risky_text
+    ev_ratio_displayed = ev_ratio_actual  # EV(certain) / EV(risky)
+    canonical_biased_choice = CHOICE["A"] if frame == FRAME["gain"] else CHOICE["B"]
 
     return {
         "problem_text": context_text,
@@ -445,7 +434,6 @@ def _resolve_anchoring(
     tpl: Dict[str, Any],
     rng: _random.Random,
     anchor_value: float,
-    ab_swap: bool,
 ) -> Dict[str, Any]:
     """
     Build a fully resolved anchoring scenario.
@@ -467,25 +455,18 @@ def _resolve_anchoring(
         low_val, high_val = high_val, low_val
 
     midpoint = (low_val + high_val) / 2.0
-    # Before swap: canonical-A = low option, canonical-B = high option
-    # Biased choice before swap: anchor ≥ midpoint → B (high), else → A (low)
-    canonical_biased_pre_swap = CHOICE["B"] if anchor_value >= midpoint else CHOICE["A"]
+    # Option A is always the low-value estimate; Option B is always the high-value estimate.
+    # Biased choice: anchor ≥ midpoint → pulled toward high → B (1); else → A (0).
+    canonical_biased_choice = CHOICE["B"] if anchor_value >= midpoint else CHOICE["A"]
 
     context_text = tpl["context"].format(anchor=anchor_value)
     low_option_text = tpl["option_template"].format(val=low_val)
     high_option_text = tpl["option_template"].format(val=high_val)
     question_text = tpl["question"]
 
-    if not ab_swap:
-        option_a_text = low_option_text
-        option_b_text = high_option_text
-        ev_ratio_displayed = low_val / high_val  # < 1
-        canonical_biased_choice = canonical_biased_pre_swap
-    else:
-        option_a_text = high_option_text
-        option_b_text = low_option_text
-        ev_ratio_displayed = high_val / low_val  # > 1
-        canonical_biased_choice = 1 - canonical_biased_pre_swap
+    option_a_text = low_option_text
+    option_b_text = high_option_text
+    ev_ratio_displayed = low_val / high_val  # always < 1
 
     problem_text = f"{context_text}\n\n{question_text}"
 
@@ -696,7 +677,7 @@ def _resolve_loss_aversion(
     tpl: Dict[str, Any],
     rng: _random.Random,
     ev_ratio_target: float,
-    ab_swap: bool,
+    ab_swap: bool = False,
 ) -> Dict[str, Any]:
     """
     Build a fully resolved loss-aversion scenario.
@@ -762,19 +743,22 @@ def _resolve_loss_aversion(
     certain_text = tpl["certain_template"].format(**params)
     risky_text = tpl["risky_template"].format(**params)
 
-    # Biased choice: prefer certain option (before swap = A)
+    # ab_swap is retained for loss-aversion so that the class distribution stays balanced.
+    # The ML model uses ev_ratio sign to determine which option is certain:
+    #   ev_ratio < 1 → A is certain → loss-averse choice is A (0)
+    #   ev_ratio > 1 → B is certain → loss-averse choice is B (1)
     canonical_biased_pre_swap = CHOICE["A"]
 
     if not ab_swap:
         option_a_text = certain_text
         option_b_text = risky_text
-        ev_ratio_displayed = ev_ratio_actual  # EV(certain) / EV(risky)
+        ev_ratio_displayed = ev_ratio_actual  # EV(certain)/EV(risky) < 1 by design
         canonical_biased_choice = canonical_biased_pre_swap
     else:
         option_a_text = risky_text
         option_b_text = certain_text
-        ev_ratio_displayed = 1.0 / ev_ratio_actual
-        canonical_biased_choice = 1 - canonical_biased_pre_swap
+        ev_ratio_displayed = 1.0 / ev_ratio_actual  # inverted → > 1
+        canonical_biased_choice = 1 - canonical_biased_pre_swap  # prefer B (certain)
 
     return {
         "problem_text": context_text,
@@ -815,19 +799,20 @@ def generate_participant_scenarios(seed: int) -> List[Dict[str, Any]]:
     resolved: List[Dict[str, Any]] = []
 
     # ── Framing scenarios ────────────────────────────────────────────────────
-    for tpl in _FRAMING_TEMPLATES:
+    # Counterbalance: exactly 5 gain frames and 5 loss frames, in random order.
+    _frames = [FRAME["gain"]] * 5 + [FRAME["loss"]] * 5
+    rng.shuffle(_frames)
+    for i, tpl in enumerate(_FRAMING_TEMPLATES):
         ev_ratio = rng.uniform(*EV_RATIO_RANGE)
-        frame = rng.randint(0, 1)
-        ab_swap = bool(rng.randint(0, 1))
-        sc = _resolve_framing(tpl, ev_ratio, frame, ab_swap)
+        frame = _frames[i]
+        sc = _resolve_framing(tpl, ev_ratio, frame)
         sc["scenario_template_id"] = tpl["template_id"]
         resolved.append(sc)
 
     # ── Anchoring scenarios ──────────────────────────────────────────────────
     for tpl in _ANCHORING_TEMPLATES:
         anchor = rng.uniform(tpl["anchor_min"], tpl["anchor_max"])
-        ab_swap = bool(rng.randint(0, 1))
-        sc = _resolve_anchoring(tpl, rng, anchor, ab_swap)
+        sc = _resolve_anchoring(tpl, rng, anchor)
         sc["scenario_template_id"] = tpl["template_id"]
         resolved.append(sc)
 

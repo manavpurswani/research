@@ -1,0 +1,13 @@
+repos:
+  - repo: local
+    hooks:
+      - id: block-secrets-toml
+        name: Block committing secrets.toml
+        entry: bash -c 'if git diff --cached --name-only | grep -q ".streamlit/secrets.toml$"; then echo "ERROR: refusing to commit .streamlit/secrets.toml"; exit 1; fi'
+        language: system
+        pass_filenames: false
+      - id: block-supabase-jwt
+        name: Block Supabase JWT-shaped strings
+        entry: bash -c 'if git diff --cached | grep -E "eyJ[A-Za-z0-9_-]{20,}" > /dev/null; then echo "ERROR: looks like a JWT/Supabase key in the diff"; exit 1; fi'
+        language: system
+        pass_filenames: false

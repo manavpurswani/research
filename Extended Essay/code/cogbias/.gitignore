@@ -1,0 +1,14 @@
+.streamlit/secrets.toml
+data_backups/
+out/
+__pycache__/
+*.pyc
+.env
+.env.*
+*.csv
+!sample_data/*.csv
+.DS_Store
+.pytest_cache/
+.coverage
+.venv/
+venv/
