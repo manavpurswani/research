@@ -41,9 +41,9 @@ _MODELS = [
     ("openai",    "gpt-4o-mini"),
     ("anthropic", "claude-opus-4-6"),
     ("anthropic", "claude-sonnet-4-6"),
-    ("anthropic", "claude-haiku-4-5"),
-    ("google",    "gemini-1.5-pro"),
-    ("google",    "gemini-1.5-flash"),
+    ("anthropic", "claude-haiku-4-5-20251001"),
+    ("google",    "gemini-3.5-flash-lite"),
+    ("google",    "gemini-3.1-flash-lite"),
     ("together",  "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"),
     ("together",  "mistralai/Mixtral-8x22B-Instruct-v0.1"),
     ("together",  "Qwen/Qwen2-72B-Instruct"),
@@ -100,8 +100,10 @@ def build_prompt(sc: dict) -> str:
 # Response parser
 # ─────────────────────────────────────────────────────────────────────────────
 
-def parse_response(raw: str) -> tuple[Optional[int], bool]:
+def parse_response(raw: Optional[str]) -> tuple[Optional[int], bool]:
     """Return (choice, invalid_response). choice: 0=A, 1=B, None=invalid."""
+    if not raw:
+        return None, True
     text = raw.strip()
     # Handle "Option A" / "option b" prefixes
     if text.lower().startswith("option "):
@@ -153,19 +155,26 @@ def _call_anthropic(model: str, prompt: str, temperature: float) -> tuple[str, i
 
 
 def _call_google(model: str, prompt: str, temperature: float) -> tuple[str, int]:
-    import google.generativeai as genai
-    genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
-    gmodel = genai.GenerativeModel(
-        model_name=model,
-        system_instruction=_SYSTEM,
-    )
+    from google import genai
+    from google.genai import types
+    client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
     t0 = time.monotonic()
-    resp = gmodel.generate_content(
-        prompt,
-        generation_config={"temperature": temperature, "max_output_tokens": 5},
+    resp = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=_SYSTEM,
+            temperature=temperature,
+            max_output_tokens=50,
+        ),
     )
     latency_ms = int((time.monotonic() - t0) * 1000)
-    return resp.text, latency_ms
+    # Thinking models separate thought parts from output parts; gather output only.
+    text = resp.text
+    if text is None and resp.candidates:
+        parts = resp.candidates[0].content.parts or []
+        text = "".join(p.text for p in parts if p.text and not getattr(p, "thought", False))
+    return text or "", latency_ms
 
 
 def _call_together(model: str, prompt: str, temperature: float) -> tuple[str, int]:
