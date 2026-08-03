@@ -672,13 +672,16 @@ if __name__ == "__main__":
     df_in = pd.read_csv(csv_path)
     print(f"Loaded {len(df_in)} rows, {df_in['participant_id'].nunique()} participants")
 
+    results_all = None
     for excl in (False, True):
         results = run_full(df_in, exclude_flagged=excl)
         print_results(results)
+        if not excl:
+            results_all = results
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    results["fig_cm_lr"].savefig(out_dir / "confusion_matrix_lr.png", dpi=150)
-    results["fig_cm_nn"].savefig(out_dir / "confusion_matrix_nn.png", dpi=150)
-    results["fig_bias_bar"].savefig(out_dir / "accuracy_by_bias_type.png", dpi=150)
-    results["fig_lr_coeff"].savefig(out_dir / "lr_coefficients.png", dpi=150)
+    results_all["fig_cm_lr"].savefig(out_dir / "confusion_matrix_lr.png", dpi=150)
+    results_all["fig_cm_nn"].savefig(out_dir / "confusion_matrix_nn.png", dpi=150)
+    results_all["fig_bias_bar"].savefig(out_dir / "accuracy_by_bias_type.png", dpi=150)
+    results_all["fig_lr_coeff"].savefig(out_dir / "lr_coefficients.png", dpi=150)
     print(f"\nFigures saved → {out_dir}")
