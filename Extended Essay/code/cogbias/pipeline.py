@@ -154,6 +154,13 @@ def load_and_prepare(
     if "completed" in df.columns:
         df = df[df["completed"] == True].copy()
 
+    if "invalid_response" in df.columns:
+        before = len(df)
+        df = df[df["invalid_response"].astype(str) != "True"].copy()
+        dropped = before - len(df)
+        if dropped:
+            print(f"[pipeline] Dropped {dropped} invalid_response rows.", flush=True)
+
     if "attention_check_passed" in df.columns:
         attn_mask = df["attention_check_passed"].notna()
         meta = df[attn_mask].copy()

@@ -44,9 +44,9 @@ _MODELS = [
     ("anthropic", "claude-haiku-4-5-20251001"),
     ("google",    "gemini-3.5-flash-lite"),
     ("google",    "gemini-3.1-flash-lite"),
-    ("together",  "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"),
-    ("together",  "mistralai/Mixtral-8x22B-Instruct-v0.1"),
-    ("together",  "Qwen/Qwen2-72B-Instruct"),
+    ("together",  "meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+    ("together",  "deepseek-ai/DeepSeek-V4-Pro"),
+    ("together",  "openai/gpt-oss-120b"),
 ]
 
 _TEMPERATURES = [0.0, 0.3, 0.5, 0.7, 1.0]
@@ -102,19 +102,26 @@ def build_prompt(sc: dict) -> str:
 
 def parse_response(raw: Optional[str]) -> tuple[Optional[int], bool]:
     """Return (choice, invalid_response). choice: 0=A, 1=B, None=invalid."""
+    import re as _re
     if not raw:
         return None, True
     text = raw.strip()
     # Handle "Option A" / "option b" prefixes
     if text.lower().startswith("option "):
         text = text[7:].strip()
+    # First pass: first alphabetic character (fast path for well-behaved models)
     for ch in text:
         if ch.isalpha():
             if ch.upper() == "A":
                 return 0, False
             if ch.upper() == "B":
                 return 1, False
-            return None, True
+            break  # First alpha is neither A nor B — fall through to last-letter search
+    # Second pass: last standalone A or B (handles reasoning-model output like "I'll choose B")
+    matches = _re.findall(r'\b[ABab]\b', text)
+    if matches:
+        last = matches[-1].upper()
+        return (0 if last == "A" else 1), False
     return None, True
 
 
@@ -178,11 +185,8 @@ def _call_google(model: str, prompt: str, temperature: float) -> tuple[str, int]
 
 
 def _call_together(model: str, prompt: str, temperature: float) -> tuple[str, int]:
-    import openai
-    client = openai.OpenAI(
-        api_key=os.environ["TOGETHER_API_KEY"],
-        base_url="https://api.together.xyz/v1",
-    )
+    from together import Together
+    client = Together(api_key=os.environ["TOGETHER_API_KEY"])
     t0 = time.monotonic()
     resp = client.chat.completions.create(
         model=model,
@@ -190,8 +194,8 @@ def _call_together(model: str, prompt: str, temperature: float) -> tuple[str, in
             {"role": "system", "content": _SYSTEM},
             {"role": "user", "content": prompt},
         ],
-        temperature=max(temperature, 0.01),  # Together doesn't support temp=0.0
-        max_tokens=5,
+        temperature=max(temperature, 0.01),  # some models don't support temp=0.0
+        max_tokens=1024,
     )
     latency_ms = int((time.monotonic() - t0) * 1000)
     return resp.choices[0].message.content or "", latency_ms
@@ -208,6 +212,39 @@ _DISPATCH = {
     "together":  _call_together,
 }
 
+_MAX_RETRIES = 3
+_RETRY_DELAY = 5  # seconds between retries
+
+
+def _call_with_retry(
+    caller, model: str, prompt: str, temperature: float
+) -> tuple[Optional[str], int]:
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return caller(model, prompt, temperature)
+        except Exception as e:
+            if attempt < _MAX_RETRIES - 1:
+                print(f"    retry {attempt+1}/{_MAX_RETRIES-1} after error: {type(e).__name__}", flush=True)
+                time.sleep(_RETRY_DELAY)
+            else:
+                print(f"    giving up after {_MAX_RETRIES} attempts: {type(e).__name__}: {e}", flush=True)
+                return None, 0
+
+
+def _load_completed_seeds(output_path: Path) -> set[int]:
+    """Return seeds of responders already fully written to the CSV."""
+    if not output_path.exists():
+        return set()
+    completed: set[int] = set()
+    with open(output_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            if row.get("completed") == "True":
+                try:
+                    completed.add(int(row["responder_seed"]))
+                except (KeyError, ValueError):
+                    pass
+    return completed
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Collection loop
@@ -216,22 +253,32 @@ _DISPATCH = {
 def collect(output_path: Path, dry_run: bool) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    completed_seeds = _load_completed_seeds(output_path)
+    if completed_seeds:
+        print(f"Resuming — {len(completed_seeds)} responders already done, skipping them.\n", flush=True)
+
     seed_counter = 1000
     total = len(_MODELS) * len(_TEMPERATURES)
-    done = 0
+    done = len(completed_seeds)
 
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
+    # Append to existing file if resuming, else write fresh with header
+    file_mode = "a" if completed_seeds else "w"
+    with open(output_path, file_mode, newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=_COLUMNS)
-        writer.writeheader()
+        if file_mode == "w":
+            writer.writeheader()
 
         for provider, model_name in _MODELS:
             caller = _call_stub if dry_run else _DISPATCH[provider]
 
             for temp in _TEMPERATURES:
-                responder_id = str(uuid.uuid4())
                 seed = seed_counter
                 seed_counter += 1
 
+                if seed in completed_seeds:
+                    continue
+
+                responder_id = str(uuid.uuid4())
                 scenarios = generate_participant_scenarios(seed)
                 rows: list[dict] = []
 
@@ -243,7 +290,7 @@ def collect(output_path: Path, dry_run: bool) -> None:
 
                 for sc in scenarios:
                     prompt = build_prompt(sc)
-                    raw, latency_ms = caller(model_name, prompt, temp)
+                    raw, latency_ms = _call_with_retry(caller, model_name, prompt, temp)
                     choice, invalid = parse_response(raw)
 
                     rows.append({
@@ -271,9 +318,10 @@ def collect(output_path: Path, dry_run: bool) -> None:
                 for row in rows:
                     row["completed"] = True
                 writer.writerows(rows)
+                f.flush()  # persist each responder immediately
                 done += 1
 
-    print(f"\nWrote {done * 30} rows → {output_path}")
+    print(f"\nWrote {done * 30} rows total → {output_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
