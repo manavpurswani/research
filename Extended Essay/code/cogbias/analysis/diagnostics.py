@@ -142,7 +142,11 @@ print(rng.to_string())
 # eta^2 of template on anchor_value
 tot = ((an.anchor_value - an.anchor_value.mean()) ** 2).sum()
 wit = an.groupby("scenario_template_id").anchor_value.apply(lambda s: ((s - s.mean()) ** 2).sum()).sum()
-print(f"eta^2 (share of anchor_value variance explained by template id): {1 - wit/tot:.3f}")
+print(f"eta^2 (a) anchoring trials only, n={len(an)}: {1 - wit/tot:.3f}")
+_tot_all = ((df.anchor_value - df.anchor_value.mean()) ** 2).sum()
+_bet_all = df.groupby("scenario_template_id").anchor_value.apply(
+    lambda s: len(s) * (s.mean() - df.anchor_value.mean()) ** 2).sum()
+print(f"eta^2 (b) all rows, n={len(df)}: {_bet_all/_tot_all:.3f}  (anchor_value is 0.0 off anchoring trials)")
 from config import *
 import scenarios as S
 tpl = {t["template_id"]: t for t in S._ANCHORING_TEMPLATES}
@@ -155,15 +159,33 @@ print("P(B | anchor in upper half of its template range):\n", an.groupby("rel_hi
 print("P(B) by anchoring template:\n", an.groupby("scenario_template_id").choice.mean().round(3).to_string())
 
 print("\n=== (7) loss aversion ===")
-la = df[df.bias_type == 3]
-print("frame values on loss-aversion rows:", la.frame.value_counts().to_dict(),
-      "| frame on anchoring rows:", df[df.bias_type == 2].frame.value_counts().to_dict(),
-      "| framing rows:", df[df.bias_type == 1].frame.value_counts().to_dict())
-print("ev_ratio<1 vs >1 on loss-aversion rows (A is certain iff <1):", (la.expected_value_ratio < 1).value_counts().to_dict())
-print("P(B|ev_ratio>1) [B=certain]:", round(la[la.expected_value_ratio > 1].choice.mean(), 3),
-      " P(B|ev_ratio<1) [B=risky]:", round(la[la.expected_value_ratio < 1].choice.mean(), 3))
-print("P(choose CERTAIN option) overall:",
-      round(np.where(la.expected_value_ratio < 1, 1 - la.choice, la.choice).mean(), 3))
-print("by template, P(choose certain):")
-la = la.assign(certain=np.where(la.expected_value_ratio < 1, 1 - la.choice, la.choice))
-print(la.groupby("scenario_template_id").certain.mean().round(3).to_string())
+# ev_ratio does NOT identify which option is the certain one (range 0.85-1.18 and a
+# random A/B swap), so rebuild each scenario from its responder_seed and read the text.
+from scenarios import generate_participant_scenarios as _gen
+_rows = []
+for seed, g_ in raw[raw.invalid_response.astype(str) != "True"].groupby("responder_seed"):
+    _sc = {x["trial_index"]: x for x in _gen(int(seed))}
+    for _, r in g_.iterrows():
+        x = _sc[int(r.trial_index)]
+        _rows.append(dict(tpl=x["scenario_template_id"], bt=x["bias_type"], ev_gen=x["expected_value_ratio"],
+                          ev_csv=r.expected_value_ratio, anch_gen=x["anchor_value"], anch_csv=r.anchor_value,
+                          tpl_csv=r.scenario_template_id, choice=r.choice, canon=x["canonical_biased_choice"],
+                          a_txt=x["option_a_text"], b_txt=x["option_b_text"], model=r.model_name))
+d = pd.DataFrame(_rows)
+print("regenerated scenarios match CSV: template", (d.tpl == d.tpl_csv).mean(),
+      "| ev_ratio", np.isclose(d.ev_csv, d.ev_gen).mean(), "| anchor", np.isclose(d.anch_csv, d.anch_gen).mean())
+la = d[d.bt == 3].copy()
+la["a_is_certain"] = la.a_txt.str.contains("guaranteed|Guaranteed|Exactly|Accept|Pay a", regex=True) & ~la.a_txt.str.contains("chance")
+la["certain"] = np.where(la.a_is_certain, 1 - la.choice, la.choice)
+print("frame on loss-aversion / anchoring / framing rows:",
+      df[df.bias_type == 3].frame.value_counts().to_dict(), df[df.bias_type == 2].frame.value_counts().to_dict(),
+      df[df.bias_type == 1].frame.value_counts().to_dict())
+print(f"ev_ratio range on loss-aversion rows: {la.ev_gen.min()} to {la.ev_gen.max()}; "
+      f"agreement of (ev_ratio<1) with 'A is certain': {((la.ev_gen < 1) == la.a_is_certain).mean():.3f}")
+print(f"P(choose certain option) overall: {la.certain.mean():.3f}  (n={len(la)});"
+      f" equals P(choice == canonical): {(la.choice == la.canon).mean():.3f}")
+print("by template:\n", la.groupby("tpl").certain.mean().round(3).to_string())
+print("by model:\n", la.groupby("model").certain.mean().round(3).to_string())
+la["ev_c_over_r"] = np.where(la.a_is_certain, la.ev_gen, 1 / la.ev_gen)
+la["band"] = pd.cut(la.ev_c_over_r, [0, 0.95, 1.05, 2])
+print("P(certain) by EV(certain)/EV(risky) band:\n", la.groupby("band", observed=True).certain.agg(["mean", "count"]).round(3).to_string())
