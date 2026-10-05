@@ -570,7 +570,7 @@ def _plot_lr_coefficients(lr: Dict, feature_names: List[str]) -> plt.Figure:
     means = np.array(lr["coeff_mean"])
     stds  = np.array(lr.get("coeff_std", [0.0] * len(means)))
     order = np.argsort(np.abs(means))[::-1]
-    fig, ax = plt.subplots(figsize=(7, max(4, len(names) * 0.45)))
+    fig, ax = plt.subplots(figsize=(8.5, max(4, len(names) * 0.45)))
     y_pos = np.arange(len(names))
     ax.barh(y_pos, means[order], xerr=stds[order], align="center",
             color=["#4C72B0" if v >= 0 else "#C44E52" for v in means[order]],
@@ -580,7 +580,8 @@ def _plot_lr_coefficients(lr: Dict, feature_names: List[str]) -> plt.Figure:
     ax.set_xlabel("Coefficient (mean ± std across folds)")
     ax.set_title(
         "Logistic Regression — Feature Coefficients\n"
-        "(positive → predicts Choice B; negative → predicts Choice A)"
+        "(positive → predicts Choice B; negative → predicts Choice A)",
+        fontsize=11,
     )
     fig.tight_layout()
     return fig
